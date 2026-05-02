@@ -111,16 +111,7 @@ def process_video(input_path, channel, watermark_text=None):
         a = ffmpeg.filter(a, 'afade', type='in', start_time=0, duration=fade_duration)
         a = ffmpeg.filter(a, 'afade', type='out', start_time=duration-fade_duration, duration=fade_duration)
         
-        # d. Subtítulos Burn-in
-        if config.get("subtitles_enabled", True):
-            font = config.get("subtitle_font", "Impact")
-            stroke_w = config.get("subtitle_stroke_width", 3)
-            stroke_c = config.get("subtitle_stroke_color", "black")
-            
-            # Escape path for ffmpeg filter
-            esc_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-            style = f"FontName={font},FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00{stroke_c},Outline={stroke_w},Shadow=0,Alignment=2,MarginV=150"
-            v = ffmpeg.filter(v, 'subtitles', esc_srt, force_style=style)
+        # Eliminados los subtítulos burn-in
             
         # e. Watermark Text
         if config.get("watermark_enabled", True):

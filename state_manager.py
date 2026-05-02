@@ -79,6 +79,14 @@ class StateManager:
                     )
                 ''')
                 
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS stream_tracking (
+                        channel TEXT PRIMARY KEY,
+                        current_stream_id TEXT,
+                        next_extract_sec INTEGER DEFAULT 1800
+                    )
+                ''')
+                
                 # Índice para consultas de quota diaria y estado
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_status ON clips(status)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_channel_ts ON clips(channel, timestamp)')
@@ -165,7 +173,7 @@ class StateManager:
             logger.error(f"Error consultando clips pendientes: {e}")
             return []
 
-    def update_status(self, clip_id, status, tiktok_url=None, increment_retry=False):
+def update_status(self, clip_id, status, tiktok_url=None, increment_retry=False):
         """Actualiza el estado de un clip y guarda URL si se subieron"""
         try:
             with self._get_conn() as conn:
@@ -195,7 +203,38 @@ class StateManager:
                     logger.info(f"URL del video guardado: {tiktok_url}")
                 return cursor.rowcount > 0
         except sqlite3.Error as e:
-            logger.error(f"Error actualizando estado de {clip_id}: {e}")
+            logger.error(f"Error actualizando status de {clip_id}: {e}")
+            return False
+
+    def get_stream_tracking(self, channel):
+        """Obtiene el tracking actual del stream para un canal."""
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT current_stream_id, next_extract_sec FROM stream_tracking WHERE channel = ?', (channel,))
+                row = cursor.fetchone()
+                if row:
+                    return {"stream_id": row[0], "next_extract_sec": row[1]}
+                return None
+        except sqlite3.Error:
+            return None
+
+    def update_stream_tracking(self, channel, stream_id, next_extract_sec):
+        """Actualiza o inserta el tracking del stream."""
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO stream_tracking (channel, current_stream_id, next_extract_sec)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(channel) DO UPDATE SET
+                        current_stream_id = excluded.current_stream_id,
+                        next_extract_sec = excluded.next_extract_sec
+                ''', (channel, stream_id, next_extract_sec))
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            logger.error(f"Error update_stream_tracking: {e}")
             return False
 
     def get_daily_upload_count(self):

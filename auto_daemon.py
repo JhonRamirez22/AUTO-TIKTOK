@@ -145,48 +145,64 @@ class AutoDaemon:
         
         return results
     
-    def detect_viral_moments(self, channel, livestream_info):
-        """Detecta momentos virales en un stream."""
+    def get_live_duration(self, channel_info):
+        """Calcula la duracion del stream en segundos."""
         try:
-            # Get channel info and check engagement
-            info = clip_monitor.get_channel_info(self.session, channel)
-            
-            if not info.get("is_live"):
+            started_at = channel_info.get("started_at")
+            if not started_at:
+                return 0
+            dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            return (datetime.now(dt.tzinfo) - dt).total_seconds()
+        except:
+            return 0
+
+    def process_sequential_clips(self, channel, live_info):
+        """Genera clips secuenciales respetando la logica de tiempos."""
+        try:
+            livestream_id = live_info.get("livestream_id")
+            if not livestream_id:
                 return None
             
-            # Check engagement if live
-            channel_id = info.get("channel_id")
-            chatroom_id = info.get("chatroom_id")
+            # Obtener estado
+            tracking = self.db.get_stream_tracking(channel)
             
-            if channel_id and chatroom_id:
-                engagement = clip_monitor.check_engagement(
-                    self.session, channel, channel_id, chatroom_id
-                )
-                viewers = engagement.get("viewers", 0)
-                chat_rate = engagement.get("chat_rate_per_min", 0)
-                eng_score = engagement.get("engagement_score", 0)
-                
-                viral_score = min(eng_score / 10, 10)
+            # Si el stream id cambió o es nuevo, resetear a 1800 (30 minutos)
+            if not tracking or tracking.get("stream_id") != str(livestream_id):
+                next_extract_sec = 1800
             else:
-                viewers = info.get("viewers", 0)
-                viral_score = viewers / 100
+                next_extract_sec = tracking.get("next_extract_sec", 1800)
             
-            min_score = self.config.get("limits", {}).get("min_viral_score", 5)
+            # Calcular tiempo transcurrido del directo
+            duration_alive = self.get_live_duration(live_info)
             
-            if viral_score >= min_score:
-                logger.info(f"[VIRAL] {channel}: score={viral_score:.1f}")
-                return {
-                    "channel": channel,
-                    "livestream": livestream_info,
-                    "viral_score": viral_score,
-                    "start_sec": 1800,
-                    "duration_sec": random.randint(self.min_duration, self.max_duration)
+            # Si el directo lleva mas tiempo que el next_extract + 30s de clip
+            if duration_alive >= (next_extract_sec + 30):
+                clip_data = {
+                    "source_type": "live",
+                    "source_url": f"https://kick.com/api/v1/channels/{channel}", # o extraer el m3u8
+                    "start_sec": next_extract_sec,
+                    "duration_sec": 30,
+                    "metadata": {
+                        "stream_id": str(livestream_id),
+                        "title": live_info.get("title", ""),
+                        "source_url": f"https://kick.com/api/v1/channels/{channel}"
+                    }
                 }
-            
+                
+                # Actualizar tracker para el siguiente ciclo: + 600 segundos (10 mins saltados) + 30 de duracion = +630
+                new_next = next_extract_sec + 630
+                self.db.update_stream_tracking(channel, str(livestream_id), new_next)
+                
+                logger.info(f"[SEQ-CLIP] {channel}: Extrayendo en {next_extract_sec}s. Siguiente sera en {new_next}s.")
+                return clip_data
+                
+            else:
+                logger.debug(f"[WAIT] {channel}: stream va por {duration_alive}s, esperando a {next_extract_sec + 30}s")
+                return None
+                
         except Exception as e:
-            logger.error(f"Error detecting viral for {channel}: {e}")
-        
-        return None
+            logger.error(f"Error process_sequential_clips para {channel}: {e}")
+            return None
     
     def check_vods_recent(self, channel):
         """Checkea VODs recientes del canal."""
@@ -386,20 +402,7 @@ class AutoDaemon:
                     upload_success = self.uploader.upload(processed_path, payload)
                     
                     if not upload_success:
-                        # Retry sin subtitles
-                        logger.warning(f"[RETRY] Clip {clip_id} failed, retrying without subtitles...")
-                        self.config["video_settings"]["subtitles_enabled"] = False
-                        save_config(self.config)
-                        
-                        process_res = video_processor.process_video(raw_path, channel)
-                        if not process_res.get("success"):
-                            raise Exception("Retry processing failed")
-                        
-                        processed_path = process_res["output"]
-                        upload_success = self.uploader.upload(processed_path, payload)
-                    
-                    if not upload_success:
-                        raise Exception("Upload failed after retry")
+                        raise Exception("Upload failed on TikTok")
                     
                     tiktok_url = f"https://www.tiktok.com/@tu_usuario/video/{clip_id}"
                     self.db.update_status(clip_id, "UPLOADED", tiktok_url=tiktok_url)
@@ -411,10 +414,16 @@ class AutoDaemon:
                 
                 # --- LIMPIEZA ---
                 try:
+                    import glob
                     if os.path.exists(raw_path):
                         os.remove(raw_path)
                     if os.path.exists(processed_path):
                         os.remove(processed_path)
+                    
+                    # Wildcard cleanup
+                    for f in glob.glob(f"*{clip_id}*.*") + glob.glob(f"temp/*{clip_id}*.*"):
+                        try: os.remove(f)
+                        except: pass
                 except:
                     pass
                 
@@ -441,20 +450,22 @@ class AutoDaemon:
                 # 1. Checkear canales activos
                 live_channels = self.check_all_channels()
                 
-                # 2. Detectar momentos virales y encolar
+                # 2. Generar clips secuenciales y revisar VODs
                 queued_now = 0
                 
                 for live in live_channels:
                     channel = live["channel"]
                     
-                    # Try live viral detection
-                    viral = self.detect_viral_moments(channel, live.get("livestream"))
-                    if viral:
+                    # Generar clip secuencial (cada 10 min)
+                    seq_clip = self.process_sequential_clips(channel, live.get("livestream", {}))
+                    if seq_clip:
                         clip_id = self.queue_clip(channel, {
                             "source_type": "live",
                             "source_url": f"https://kick.com/{channel}/hls/{channel}.m3u8",
-                            "viral_score": viral.get("viral_score", 5),
-                            "metadata": viral.get("livestream", {})
+                            "start_sec": seq_clip["start_sec"],
+                            "duration_sec": seq_clip["duration_sec"],
+                            "viral_score": 5.0, # Dummy score
+                            "metadata": seq_clip["metadata"]
                         })
                         if clip_id:
                             queued_now += 1

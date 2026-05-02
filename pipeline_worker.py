@@ -157,9 +157,12 @@ def run_pipeline(clip_id):
         
     finally:
         # ==========================================
-        # PASO 5: LIMPIEZA
+        # PASO 5: LIMPIEZA TOTAL
         # ==========================================
         logger.info("5. Limpieza de archivos de disco...")
+        import glob
+        
+        # Borrar raw y procesados explicitos
         if raw_video_path and os.path.exists(raw_video_path):
             try: os.remove(raw_video_path)
             except Exception as e: logger.warning(f"No se pudo borrar {raw_video_path}: {e}")
@@ -167,6 +170,11 @@ def run_pipeline(clip_id):
         if processed_video_path and os.path.exists(processed_video_path):
             try: os.remove(processed_video_path)
             except Exception as e: logger.warning(f"No se pudo borrar {processed_video_path}: {e}")
+            
+        # Limpieza por comodin para cualquier archivo asociado a este clip_id en temp/ o current
+        for f in glob.glob(f"*{clip_id}*.*") + glob.glob(f"temp/*{clip_id}*.*"):
+            try: os.remove(f)
+            except: pass
 
     return True
 

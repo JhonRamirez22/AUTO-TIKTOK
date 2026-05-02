@@ -262,15 +262,19 @@ class TikTokUploader:
                     # Forzar que el input sea visible si está oculto y enviar el archivo
                     input_video.evaluate("el => el.style.display = 'block'")
                     input_video.set_input_files(video_path)
-                    logger.info("Archivo cargado en input. Esperando procesamiento de TikTok (60s)...")
+                    logger.info("Archivo cargado en input. Esperando procesamiento de TikTok...")
                     
-                    # IMPORTANTE: Esperar 60 segundos para que TikTok procese el video
-                    page.wait_for_timeout(60000)  # 60 segundos para procesamiento
-                    human_delay(5, 10)
-                
-                # Esperar a que el video cargue en la UI (puede tardar dependiendo del peso)
-                page.wait_for_timeout(20000)  # 20 segundos para procesamiento
-                human_delay(5, 10)
+                    # Espera inteligente al indicador de carga (loading spinner o progreso)
+                    try:
+                        # TikTok muestra botones o clases especificas cuando termina la subida.
+                        # En lugar de un timeout fijo, esperamos a que desaparezca la UI de carga o aparezcan elementos clave
+                        page.wait_for_selector('button:has-text("Post")', state="visible", timeout=120000)
+                        logger.info("Video procesado exitosamente por la UI de TikTok.")
+                    except Exception as wait_e:
+                        logger.warning(f"Timeout esperando confirmacion visual de subida. Intentando continuar... ({wait_e})")
+                        page.wait_for_timeout(10000) # Fallback corto
+                    
+                    human_delay(2, 5)
                 
                 # Cerrar el modal principal (solo uno, no iterar)
                 logger.info("Cerrando modal principal...")
@@ -355,23 +359,38 @@ class TikTokUploader:
                     page.keyboard.press("Backspace")
                     page.wait_for_timeout(500)
                     
-                    # Escribir con el keyboard (más realista que fill)
-                    page.keyboard.type(description, delay=random.randint(30, 80))
-                    logger.info("Descripción insertada con keyboard.")
+                    # Escribir el título principal
+                    title_text = payload.get("title", description)
+                    page.keyboard.type(title_text, delay=random.randint(30, 80))
+                    page.keyboard.press("Enter")
+                    logger.info("Título insertado con keyboard.")
                     
-                    # IMPORTANTE: Cerrar dropdown de hashtags de TikTok
+                    # Escribir los hashtags uno por uno para activar el dropdown
+                    hashtags_list = payload.get("hashtags", [])
+                    for tag in hashtags_list:
+                        # Extraer solo el texto (sin '#') por si viene con '#'
+                        tag_word = tag.replace('#', '')
+                        
+                        page.keyboard.type(f"#{tag_word}", delay=random.randint(40, 100))
+                        page.wait_for_timeout(1000) # Esperar que TikTok dispare el dropdown
+                        
+                        # Buscar el dropdown y presionar Enter
+                        try:
+                            # Esperar a que el elemento del dropdown aparezca
+                            dropdown_selector = '[data-e2e="challenge-item"]'
+                            page.wait_for_selector(dropdown_selector, timeout=3000, state="visible")
+                            page.keyboard.press("Enter")
+                            logger.info(f"Hashtag {tag} validado en TikTok")
+                        except Exception:
+                            logger.warning(f"Dropdown no aparecio para {tag}, separando por espacio")
+                            page.keyboard.press("Space")
+                            
+                        page.wait_for_timeout(500)
+                        
+                    # IMPORTANTE: Cerrar dropdown de hashtags de TikTok por si quedo abierto
                     page.wait_for_timeout(1000)
-                    page.keyboard.press("Escape")  # Cerrar dropdown si aparece
+                    page.keyboard.press("Escape")
                     page.wait_for_timeout(500)
-                    
-                    # Si hay sugerencias de hashtags, seleccionarlas con arrow keys
-                    if page.locator('[data-e2e="challenge-item"]').count() > 0:
-                        logger.info("Dropdown de hashtags detectado, seleccionando...")
-                        page.keyboard.press("ArrowDown")
-                        page.wait_for_timeout(300)
-                        page.keyboard.press("Enter")
-                    else:
-                        logger.info("No hay dropdown de hashtags")
                 else:
                     logger.warning("No se pudo encontrar el editor de texto. Intentando fallback con JS...")
                     # Fallback: injectar descripción con JavaScript puro
